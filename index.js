@@ -26,13 +26,6 @@ const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = admin.firestore();
 
-// Make Firebase services available to all routes
-app.use((req, res, next) => {
-  req.auth = auth;
-  req.db = db;
-  next();
-});
-
 // Authentication middleware
 const authenticateUser = async (req, res, next) => {
   try {
@@ -56,61 +49,14 @@ app.get('/', (req, res) => {
   res.send('Meeting Scheduler API is running');
 });
 
-// Test Firebase connection
-app.get('/test-firebase', async (req, res) => {
-  try {
-    // Test Firebase Auth connection
-    const authStatus = auth ? "Connected to Firebase Auth" : "Failed to connect to Firebase Auth";
-    
-    // Test Firestore connection by attempting to read data
-    let firestoreStatus = "Unknown";
-    try {
-      // Create a test collection if it doesn't exist and add a test document
-      const testRef = await db.collection('connection_tests').add({
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        message: "Test connection successful"
-      });
-      
-      // Attempt to read from the collection
-      const querySnapshot = await db.collection('connection_tests').get();
-      const docCount = querySnapshot.size;
-      
-      firestoreStatus = `Connected to Firestore. Found ${docCount} test documents.`;
-    } catch (dbError) {
-      console.error("Firestore test error:", dbError);
-      firestoreStatus = `Failed to connect to Firestore: ${dbError.message}`;
-    }
-    
-    // Return connection status
-    res.json({
-      success: true,
-      firebase: {
-        auth: authStatus,
-        firestore: firestoreStatus,
-        config: {
-          projectId: firebaseConfig.projectId,
-          storageBucket: firebaseConfig.storageBucket
-        }
-      },
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error("Firebase connection test failed:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 // MEETINGS API ENDPOINTS
 
 // Create a new meeting
 app.post('/api/meetings', authenticateUser, async (req, res) => {
   try {
-    const { title, date, location, notes, participants } = req.body;
+    const { title, date, location, notes } = req.body;
     
+    // Validate required fields
     if (!title) {
       return res.status(400).json({ error: 'Meeting title is required' });
     }
@@ -127,7 +73,7 @@ app.post('/api/meetings', authenticateUser, async (req, res) => {
       date: meetingDate.toISOString(),
       location: location || '',
       notes: notes || '',
-      participants: participants || [],
+      participants: [],
       createdBy: req.user.uid,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -156,8 +102,9 @@ app.get('/api/meetings', authenticateUser, async (req, res) => {
   try {
     const userId = req.user.uid;
     
-    // You could also filter by participants or other criteria
-    const meetingsQuery = db.collection('meetings').where('createdBy', '==', userId);
+    const meetingsQuery = db.collection('meetings')
+      .where('createdBy', '==', userId)
+      .orderBy('date', 'asc');
     
     const querySnapshot = await meetingsQuery.get();
     
@@ -179,72 +126,12 @@ app.get('/api/meetings', authenticateUser, async (req, res) => {
   }
 });
 
-// Get meetings where user is a participant
-app.get('/api/meetings/participating', authenticateUser, async (req, res) => {
-  try {
-    const userId = req.user.uid;
-    
-    const meetingsQuery = db.collection('meetings').where('participants', 'array-contains', userId);
-    
-    const querySnapshot = await meetingsQuery.get();
-    
-    const meetings = [];
-    querySnapshot.forEach((doc) => {
-      const meetingData = doc.data();
-      meetings.push({
-        id: doc.id,
-        ...meetingData,
-        createdAt: meetingData.createdAt ? meetingData.createdAt.toDate().toISOString() : null,
-        updatedAt: meetingData.updatedAt ? meetingData.updatedAt.toDate().toISOString() : null
-      });
-    });
-    
-    res.status(200).json({ meetings });
-  } catch (error) {
-    console.error('Error getting participant meetings:', error);
-    res.status(500).json({ error: 'Failed to retrieve meetings', details: error.message });
-  }
-});
-
-// Get a specific meeting by ID
-app.get('/api/meetings/:id', authenticateUser, async (req, res) => {
-  try {
-    const meetingId = req.params.id;
-    const userId = req.user.uid;
-    
-    const meetingRef = db.collection('meetings').doc(meetingId);
-    const meetingSnap = await meetingRef.get();
-    
-    if (!meetingSnap.exists) {
-      return res.status(404).json({ error: 'Meeting not found' });
-    }
-    
-    const meetingData = meetingSnap.data();
-    
-    // Check if user has access to the meeting (creator or participant)
-    if (meetingData.createdBy !== userId && 
-        !meetingData.participants?.includes(userId)) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    
-    res.status(200).json({
-      id: meetingSnap.id,
-      ...meetingData,
-      createdAt: meetingData.createdAt ? meetingData.createdAt.toDate().toISOString() : null,
-      updatedAt: meetingData.updatedAt ? meetingData.updatedAt.toDate().toISOString() : null
-    });
-  } catch (error) {
-    console.error('Error getting meeting:', error);
-    res.status(500).json({ error: 'Failed to retrieve meeting', details: error.message });
-  }
-});
-
 // Update a meeting
 app.put('/api/meetings/:id', authenticateUser, async (req, res) => {
   try {
     const meetingId = req.params.id;
     const userId = req.user.uid;
-    const { title, date, location, notes, participants } = req.body;
+    const { title, date, location, notes } = req.body;
     
     // Check if meeting exists
     const meetingRef = db.collection('meetings').doc(meetingId);
@@ -280,7 +167,6 @@ app.put('/api/meetings/:id', authenticateUser, async (req, res) => {
     if (meetingDate !== undefined) updateData.date = meetingDate;
     if (location !== undefined) updateData.location = location;
     if (notes !== undefined) updateData.notes = notes;
-    if (participants !== undefined) updateData.participants = participants;
     
     await meetingRef.update(updateData);
     
@@ -335,110 +221,6 @@ app.delete('/api/meetings/:id', authenticateUser, async (req, res) => {
   } catch (error) {
     console.error('Error deleting meeting:', error);
     res.status(500).json({ error: 'Failed to delete meeting', details: error.message });
-  }
-});
-
-// Add participant to a meeting
-app.post('/api/meetings/:id/participants', authenticateUser, async (req, res) => {
-  try {
-    const meetingId = req.params.id;
-    const userId = req.user.uid;
-    const { participantId } = req.body;
-    
-    if (!participantId) {
-      return res.status(400).json({ error: 'Participant ID is required' });
-    }
-    
-    // Check if meeting exists
-    const meetingRef = db.collection('meetings').doc(meetingId);
-    const meetingSnap = await meetingRef.get();
-    
-    if (!meetingSnap.exists) {
-      return res.status(404).json({ error: 'Meeting not found' });
-    }
-    
-    const meetingData = meetingSnap.data();
-    
-    // Check if user is the creator
-    if (meetingData.createdBy !== userId) {
-      return res.status(403).json({ error: 'Only the meeting creator can add participants' });
-    }
-    
-    // Get current participants or initialize empty array
-    const participants = meetingData.participants || [];
-    
-    // Check if participant already exists
-    if (participants.includes(participantId)) {
-      return res.status(400).json({ error: 'Participant already added to meeting' });
-    }
-    
-    // Add the new participant
-    participants.push(participantId);
-    
-    // Update the meeting
-    await meetingRef.update({
-      participants,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-    
-    res.status(200).json({
-      success: true,
-      message: 'Participant added successfully',
-      participants
-    });
-  } catch (error) {
-    console.error('Error adding participant:', error);
-    res.status(500).json({ error: 'Failed to add participant', details: error.message });
-  }
-});
-
-// Remove participant from a meeting
-app.delete('/api/meetings/:id/participants/:participantId', authenticateUser, async (req, res) => {
-  try {
-    const meetingId = req.params.id;
-    const userId = req.user.uid;
-    const participantId = req.params.participantId;
-    
-    // Check if meeting exists
-    const meetingRef = db.collection('meetings').doc(meetingId);
-    const meetingSnap = await meetingRef.get();
-    
-    if (!meetingSnap.exists) {
-      return res.status(404).json({ error: 'Meeting not found' });
-    }
-    
-    const meetingData = meetingSnap.data();
-    
-    // Check if user is the creator or removing themselves
-    if (meetingData.createdBy !== userId && userId !== participantId) {
-      return res.status(403).json({ error: 'Unauthorized to remove this participant' });
-    }
-    
-    // Get current participants
-    const participants = meetingData.participants || [];
-    
-    // Check if participant exists
-    if (!participants.includes(participantId)) {
-      return res.status(400).json({ error: 'Participant not found in meeting' });
-    }
-    
-    // Remove the participant
-    const updatedParticipants = participants.filter(id => id !== participantId);
-    
-    // Update the meeting
-    await meetingRef.update({
-      participants: updatedParticipants,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-    
-    res.status(200).json({
-      success: true,
-      message: 'Participant removed successfully',
-      participants: updatedParticipants
-    });
-  } catch (error) {
-    console.error('Error removing participant:', error);
-    res.status(500).json({ error: 'Failed to remove participant', details: error.message });
   }
 });
 
